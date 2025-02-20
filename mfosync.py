@@ -19,8 +19,9 @@ FILE_ATTRIBUTE_HIDDEN = 0x2
 running_threads = {}  # Lưu các luồng đồng bộ đang chạy
 stop_flags = {}  # Cờ dừng cho từng tiến trình
 
-root = tk.Tk()
-root.withdraw()
+def show_notification():
+    time.sleep(1)  # Đợi 1 giây để đảm bảo system tray đã hiển thị
+    messagebox.showinfo("Thông báo", "Process is running in the background. Check in system tray.")
 
 def remove_readonly(func, path, _):
     os.chmod(path, stat.S_IWRITE)
@@ -149,6 +150,8 @@ def sync_loop(task_name, src, dst):
 
 def create_process(icon, item):
     tasks = load_tasks()
+    root = tk.Tk()
+    root.withdraw()
 
     task_name = simpledialog.askstring("Tên tiến trình", "Nhập tên tiến trình:", parent=root)
     root.destroy()
@@ -269,8 +272,12 @@ def create_system_tray_icon():
 
         return image
 
-    icon = Icon("Sync USB", create_icon(), menu=Menu())
+    icon = Icon("Mfosync", create_icon(), menu=Menu())
+    icon.title = "Mfosync"  # Tooltip hiển thị khi di chuột qua
     update_menu(icon)
+    
+    # Chạy thông báo trong luồng riêng để không chặn system tray
+    threading.Thread(target=show_notification, daemon=True).start()
     icon.run()
 
 def exit_app(icon):
