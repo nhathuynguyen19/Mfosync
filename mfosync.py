@@ -11,11 +11,15 @@ from pystray import Icon, MenuItem, Menu
 from PIL import Image, ImageDraw
 import functools
 import stat
+import sys
 
-# Lấy đường dẫn thư mục chứa file .exe hoặc .py
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, 'frozen', False):  # Kiểm tra nếu chương trình chạy từ PyInstaller
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TASK_FILE = os.path.join(BASE_DIR, "tasks.json")
 FILE_ATTRIBUTE_HIDDEN = 0x2
+
 running_threads = {}  # Lưu các luồng đồng bộ đang chạy
 stop_flags = {}  # Cờ dừng cho từng tiến trình
 
