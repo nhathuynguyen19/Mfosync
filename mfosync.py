@@ -66,53 +66,62 @@ def set_hidden(filepath):
     except:
         pass
 
+def is_temp_file(filename):
+    """Kiểm tra xem tệp/thư mục có phải là tạm thời hay không."""
+    temp_patterns = ["~", ".tmp", ".part", ".crdownload", "New Folder", "New Text Document"]
+    return any(filename.startswith(pattern) or filename.endswith(pattern) for pattern in temp_patterns)
+
+def is_temp_file(filename):
+    """Kiểm tra xem tệp/thư mục có phải là tạm thời không."""
+    temp_extensions = {'.tmp', '.swp', '.lock'}
+    return any(filename.endswith(ext) for ext in temp_extensions)
+
 def sync_folders(src, dst):
-    """Đồng bộ hóa từ thư mục nguồn (src) sang thư mục đích (dst) mà KHÔNG xóa dữ liệu ở nguồn"""
-    
-    # 🔹 Kiểm tra nếu thư mục đích bị xóa khi đang chạy
-    if not os.path.exists(dst):
-        print(f"⚠️ Thư mục đích {dst} bị xóa! Đang tạo lại...")
-        os.makedirs(dst)
-
-    # 🔹 Kiểm tra nếu thư mục nguồn bị xóa (chương trình sẽ không làm gì)
+    """Đồng bộ hóa thư mục nguồn sang thư mục đích theo hướng một chiều."""
     if not os.path.exists(src):
-        print(f"⚠️ Thư mục nguồn {src} không tồn tại! Bỏ qua đồng bộ.")
+        if os.path.exists(dst):
+            shutil.rmtree(dst)
+            print(f"Đã xóa thư mục đích: {dst} vì thư mục nguồn không tồn tại.")
         return
-
-    # 🔹 Lấy danh sách tệp/thư mục
-    src_files = set(os.listdir(src))
-    dst_files = set(os.listdir(dst))
-
-    for file in src_files:
-        src_path = os.path.join(src, file)
-        dst_path = os.path.join(dst, file)
-
-        if os.path.isdir(src_path):
-            # 🔥 Chỉ tạo thư mục con nếu nó có dữ liệu trong nguồn
-            if not os.path.exists(dst_path):
-                os.makedirs(dst_path)
-                print(f"📂 Đã tạo thư mục: {dst_path}")
-
-            sync_folders(src_path, dst_path)
-
-        else:
-            try:
-                if file not in dst_files or (os.path.exists(dst_path) and not filecmp.cmp(src_path, dst_path, shallow=False)):
-                    shutil.copy2(src_path, dst_path)
-                    print(f"📄 Đã sao chép: {src_path} -> {dst_path}")
-                    continue
-            except PermissionError:
-                print(f"❌ Không thể truy cập {src_path}. Bỏ qua.")
-
-    # ❌ Không bao giờ xóa file/thư mục trong nguồn
-    for file in dst_files:
-        if file not in src_files:  # Nếu file không còn trong nguồn, xóa khỏi đích
-            dst_path = os.path.join(dst, file)
-            if os.path.isdir(dst_path):
-                shutil.rmtree(dst_path, onerror=remove_readonly)
-            else:
+    
+    if not os.path.exists(dst):
+        os.makedirs(dst)
+        print(f"Đã tạo thư mục đích: {dst}")
+    
+    for root, dirs, files in os.walk(src):
+        rel_path = os.path.relpath(root, src)
+        dst_root = os.path.join(dst, rel_path) if rel_path != '.' else dst
+        
+        if not os.path.exists(dst_root):
+            os.makedirs(dst_root)
+            print(f"Đã tạo thư mục: {dst_root}")
+        
+        for file in files:
+            if is_temp_file(file):
+                continue
+            
+            src_path = os.path.join(root, file)
+            dst_path = os.path.join(dst_root, file)
+            
+            if not os.path.exists(dst_path) or not filecmp.cmp(src_path, dst_path, shallow=False):
+                shutil.copy2(src_path, dst_path)
+                print(f"Đã cập nhật: {src_path} -> {dst_path}")
+    
+    for root, dirs, files in os.walk(dst, topdown=False):
+        rel_path = os.path.relpath(root, dst)
+        src_root = os.path.join(src, rel_path) if rel_path != '.' else src
+        
+        for file in files:
+            dst_path = os.path.join(root, file)
+            if not os.path.exists(os.path.join(src_root, file)) and not is_temp_file(file):
                 os.remove(dst_path)
-            print(f"🗑 Đã xóa khỏi {dst}: {dst_path}")
+                print(f"Đã xóa tệp: {dst_path}")
+        
+        for dir in dirs:
+            dst_dir = os.path.join(root, dir)
+            if not os.path.exists(os.path.join(src_root, dir)):
+                shutil.rmtree(dst_dir)
+                print(f"Đã xóa thư mục: {dst_dir}")
 
 def sync_loop(task_name, src, dst):
     """Luồng chạy đồng bộ hóa cho từng tiến trình"""
@@ -143,9 +152,8 @@ def sync_loop(task_name, src, dst):
 
         # Tiến hành đồng bộ
         sync_folders(src, dst)
-        sync_folders(dst, src)
         print(f"[{task_name}] Đồng bộ hoàn tất.")
-        time.sleep(1)
+        time.sleep(2)
 
     print(f"[{task_name}] Đã dừng đồng bộ.")  # Xác nhận tiến trình đã dừng
 
@@ -185,6 +193,11 @@ def create_process(icon, item):
     if not dst:
         print("⚠️ Hủy tiến trình do không có thư mục đích.")
         messagebox.showerror("Lỗi", "Không có thư mục đích nào được chọn.")
+        return
+
+    if not src or not dst:
+        print("⚠️ Hủy tiến trình do không có thư mục nguồn hoặc đích.")
+        messagebox.showerror("Lỗi", "Không có thư mục nguồn hoặc đích nào được chọn.")
         return
 
     tasks.append({"name": task_name, "source": src, "destination": dst})
