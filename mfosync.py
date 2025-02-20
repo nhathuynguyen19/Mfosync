@@ -20,7 +20,6 @@ running_threads = {}  # Lưu các luồng đồng bộ đang chạy
 stop_flags = {}  # Cờ dừng cho từng tiến trình
 
 def show_notification():
-    time.sleep(1)  # Đợi 1 giây để đảm bảo system tray đã hiển thị
     messagebox.showinfo("Thông báo", "Process is running in the background. Check in system tray.")
 
 def remove_readonly(func, path, _):
@@ -48,7 +47,9 @@ def select_folder(title):
     """Mở hộp thoại chọn thư mục"""
     root = tk.Tk()
     root.withdraw()
-    return filedialog.askdirectory(title=title)
+    folder = filedialog.askdirectory(title=title)
+    root.destroy()
+    return folder
 
 def is_hidden(filepath):
     """Kiểm tra xem tệp/thư mục có thuộc tính ẩn không"""
@@ -158,6 +159,7 @@ def create_process(icon, item):
 
     if not task_name:
         print("⚠️ Tên tiến trình không được để trống.")
+        messagebox.showerror("Lỗi", "Tên tiến trình không được để trống.")
         return
     
     try:
@@ -165,20 +167,24 @@ def create_process(icon, item):
         task_name.encode('utf-8')  # Kiểm tra xem có lỗi Unicode không
     except UnicodeEncodeError:
         print("❌ Lỗi khi nhập tên tiến trình, vui lòng nhập lại bằng ký tự hợp lệ.")
+        messagebox.showerror("Lỗi", "Tên tiến trình không hợp lệ. Vui lòng nhập lại.")
         return
 
     if task_name in [t["name"] for t in tasks]:
         print("⚠️ Tên tiến trình đã tồn tại.")
+        messagebox.showerror("Lỗi", "Tên tiến trình đã tồn tại. Vui lòng chọn tên khác.")
         return
 
     src = select_folder("Chọn thư mục nguồn")
     if not src:
         print("⚠️ Hủy tiến trình do không có thư mục nguồn.")
+        messagebox.showerror("Lỗi", "Không có thư mục nguồn nào được chọn.")
         return
 
     dst = select_folder("Chọn thư mục đích")
     if not dst:
         print("⚠️ Hủy tiến trình do không có thư mục đích.")
+        messagebox.showerror("Lỗi", "Không có thư mục đích nào được chọn.")
         return
 
     tasks.append({"name": task_name, "source": src, "destination": dst})
@@ -190,6 +196,7 @@ def create_process(icon, item):
 
     update_menu(icon)
 
+    messagebox.showinfo(f"Thông báo", "Tiến trình đã được thêm.")
 
 def update_menu(icon):
     """Cập nhật menu systray với danh sách tiến trình"""
