@@ -19,9 +19,10 @@ else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TASK_FILE = os.path.join(BASE_DIR, "tasks.json")
 FILE_ATTRIBUTE_HIDDEN = 0x2
-
+lock = threading.Lock()
 running_threads = {}  # Lưu các luồng đồng bộ đang chạy
 stop_flags = {}  # Cờ dừng cho từng tiến trình
+running_flags = {}  # Cờ đánh dấu tiến trình đang chạy
 
 def show_notification():
     messagebox.showinfo("Thông báo", "Process is running in the background. Check in system tray.")
@@ -80,17 +81,27 @@ def is_temp_file(filename):
     temp_extensions = {'.tmp', '.swp', '.lock'}
     return any(filename.endswith(ext) for ext in temp_extensions)
 
-def sync_folders(src, dst):
+def is_recently_created(path, threshold=60):
+    """Kiểm tra xem tệp hoặc thư mục có được tạo trong vòng `threshold` giây không."""
+    creation_time = os.path.getctime(path)
+    current_time = time.time()
+    return (current_time - creation_time) < threshold
+
+def sync_folders(src, dst, task_name):
     """Đồng bộ hóa thư mục nguồn sang thư mục đích theo hướng một chiều."""
     if not os.path.exists(src):
         if os.path.exists(dst):
+            running_flags[task_name] = True
             shutil.rmtree(dst)
             print(f"Đã xóa thư mục đích: {dst} vì thư mục nguồn không tồn tại.")
+        running_flags[task_name] = False
         return
     
     if not os.path.exists(dst):
+        running_flags[task_name] = True
         os.makedirs(dst)
         print(f"Đã tạo thư mục đích: {dst}")
+    running_flags[task_name] = False
     
     for root, dirs, files in os.walk(src):
         rel_path = os.path.relpath(root, src)
@@ -98,7 +109,9 @@ def sync_folders(src, dst):
         
         if not os.path.exists(dst_root):
             os.makedirs(dst_root)
+            running_flags[task_name] = True
             print(f"Đã tạo thư mục: {dst_root}")
+        running_flags[task_name] = False
         
         for file in files:
             if is_temp_file(file):
@@ -108,8 +121,10 @@ def sync_folders(src, dst):
             dst_path = os.path.join(dst_root, file)
             
             if not os.path.exists(dst_path) or not filecmp.cmp(src_path, dst_path, shallow=False):
+                running_flags[task_name] = True
                 shutil.copy2(src_path, dst_path)
                 print(f"Đã cập nhật: {src_path} -> {dst_path}")
+            running_flags[task_name] = False
     
     for root, dirs, files in os.walk(dst, topdown=False):
         rel_path = os.path.relpath(root, dst)
@@ -117,15 +132,23 @@ def sync_folders(src, dst):
         
         for file in files:
             dst_path = os.path.join(root, file)
-            if not os.path.exists(os.path.join(src_root, file)) and not is_temp_file(file):
-                os.remove(dst_path)
-                print(f"Đã xóa tệp: {dst_path}")
+            src_file_path = os.path.join(src_root, file)
+            if not os.path.exists(src_file_path) and not is_temp_file(file):
+                if not is_recently_created(dst_path):  # Kiểm tra thời gian tạo
+                    os.remove(dst_path)
+                    running_flags[task_name] = True
+                    print(f"Đã xóa tệp: {dst_path}")
+            running_flags[task_name] = False
         
         for dir in dirs:
             dst_dir = os.path.join(root, dir)
-            if not os.path.exists(os.path.join(src_root, dir)):
-                shutil.rmtree(dst_dir)
-                print(f"Đã xóa thư mục: {dst_dir}")
+            src_dir_path = os.path.join(src_root, dir)
+            if not os.path.exists(src_dir_path):
+                if not is_recently_created(dst_dir):  # Kiểm tra thời gian tạo
+                    shutil.rmtree(dst_dir)
+                    running_flags[task_name] = True
+                    print(f"Đã xóa thư mục: {dst_dir}")
+            running_flags[task_name] = False
 
 def sync_loop(task_name, src, dst):
     """Luồng chạy đồng bộ hóa cho từng tiến trình"""
@@ -140,22 +163,30 @@ def sync_loop(task_name, src, dst):
         if not os.path.exists(dst_drive):
             if usb_plugin:
                 print(f"[{task_name}] Ổ đĩa chưa cắm, đang chờ...")
+                running_flags[task_name] = False
                 usb_plugin = False
-            time.sleep(1)
+            time.sleep(2)
             continue  # Quay lại vòng lặp để tiếp tục kiểm tra
+        running_flags[task_name] = True
         
         # Kiểm tra thư mục đích, nếu chưa có thì tạo
         if not os.path.exists(dst):
             print(f"[{task_name}] Thư mục đích chưa tồn tại, đang tạo...")
             os.makedirs(dst)
+            running_flags[task_name] = True
+        running_flags[task_name] = False
 
         # Thông báo USB đã được cắm
         if not usb_plugin:
             print(f"[{task_name}] Ổ đĩa đã cắm, bắt đầu đồng bộ...")
+            running_flags[task_name] = True
             usb_plugin = True
+        running_flags[task_name] = False
 
         # Tiến hành đồng bộ
-        sync_folders(src, dst)
+        running_flags[task_name] = True
+        sync_folders(src, dst, task_name)
+        running_flags[task_name] = False
         print(f"[{task_name}] Đồng bộ hoàn tất.")
         time.sleep(2)
 
@@ -207,9 +238,10 @@ def create_process(icon, item):
     tasks.append({"name": task_name, "source": src, "destination": dst})
     save_tasks(tasks)
 
-    thread = threading.Thread(target=sync_loop, args=(task_name, src, dst), daemon=True)
+    thread = threading.Thread(target=sync_loop, args=(task_name, src, dst, icon), daemon=True)
     thread.start()
     running_threads[task_name] = thread
+    running_flags[task_name] = True
 
     update_menu(icon)
 
@@ -225,22 +257,26 @@ def update_menu(icon):
 
     menu_items = [MenuItem("Tạo tiến trình", create_process_thread)]
     task_name_item = []
-    for task in tasks:
-        if not isinstance(task, dict):
-            print("Lỗi: task không phải dictionary!", task)
-            continue  # Bỏ qua phần tử không hợp lệ
 
-        task_name = task.get("name", "Không tên")
-        task_name = task_name.encode("utf-8").decode("utf-8")
-        source = task.get("source", "Không xác định")
-        destination = task.get("destination", "Không xác định")
+    with lock:
+        for task in tasks:
+            if not isinstance(task, dict):
+                print("Lỗi: task không phải dictionary!", task)
+                continue  # Bỏ qua phần tử không hợp lệ
+            if running_flags.get(task["name"], False):
+                task_name = task.get("name", "Không tên")
+            else:
+                task_name = task.get("name", "Không tên")
+            task_name = task_name.encode("utf-8").decode("utf-8")
+            source = task.get("source", "Không xác định")
+            destination = task.get("destination", "Không xác định")
 
-        # Tạo submenu cho từng tiến trình
-        task_submenu = Menu(
-            MenuItem(f"🟢 {source} → {destination}", lambda: None, enabled=False),
-            MenuItem(f"❌ Xóa {task_name}", functools.partial(delete_task, icon, task_name))
-        )
-        task_name_item.append(MenuItem(task_name, task_submenu))
+            # Tạo submenu cho từng tiến trình
+            task_submenu = Menu(
+                MenuItem(f"🟢 {source} → {destination}", lambda: None, enabled=False),
+                MenuItem(f"❌ Xóa {task_name}", functools.partial(delete_task, icon, task_name))
+            )
+            task_name_item.append(MenuItem(task_name, task_submenu))
 
     if task_name_item:
         menu_items.append(MenuItem("Danh sách tiến trình", Menu(*task_name_item)))
@@ -249,7 +285,6 @@ def update_menu(icon):
 
     menu_items.append(MenuItem("Thoát", lambda icon, item: exit_app(icon)))
     icon.menu = Menu(*menu_items)
-
 
 def delete_task(icon, task_name, *args):
     """Xóa một tiến trình khỏi danh sách"""
@@ -303,6 +338,7 @@ def create_system_tray_icon():
     # Chạy thông báo trong luồng riêng để không chặn system tray
     threading.Thread(target=show_notification, daemon=True).start()
     icon.run()
+    return icon
 
 def exit_app(icon):
     """Thoát ứng dụng"""
@@ -315,7 +351,6 @@ for task in tasks:  # Duyệt từng task trong danh sách
     thread = threading.Thread(target=sync_loop, args=(task["name"], task["source"], task["destination"]), daemon=True)
     thread.start()
 
-# Khởi chạy icon system tray
 create_system_tray_icon()
 
 # Hiển thị thông báo
