@@ -12,157 +12,122 @@ from PIL import Image, ImageDraw
 import functools
 import stat
 import sys
-
-if getattr(sys, 'frozen', False):  # Kiểm tra nếu chương trình chạy từ PyInstaller
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TASK_FILE = os.path.join(BASE_DIR, "tasks.json")
-FILE_ATTRIBUTE_HIDDEN = 0x2
+from utils import *
+from files import *
+from paths import *
+    
 lock = threading.Lock()
 running_threads = {}  # Lưu các luồng đồng bộ đang chạy
 stop_flags = {}  # Cờ dừng cho từng tiến trình
 running_flags = {}  # Cờ đánh dấu tiến trình đang chạy
 
-def show_notification():
-    messagebox.showinfo("Thông báo", "Process is running in the background. Check in system tray.")
-
-def remove_readonly(func, path, _):
-    os.chmod(path, stat.S_IWRITE)
-    func(path)
-
 def create_process_thread(icon, item):
     threading.Thread(target=create_process, args=(icon, item), daemon=True).start()
 
-def load_tasks():
-    if not os.path.exists(TASK_FILE):
-        with open(TASK_FILE, "w", encoding='utf-8') as file:
-            json.dump([], file)  # Tạo file trống với danh sách rỗng []
-        print(f"📁 Đã tạo {TASK_FILE} vì không tìm thấy.")
-
-    with open(TASK_FILE, "r", encoding='utf-8') as file:
-        return json.load(file)
-
-def save_tasks(tasks):
-    """Lưu danh sách tiến trình vào file JSON"""
-    with open(TASK_FILE, "w", encoding='utf-8') as f:
-        json.dump(tasks, f, indent=4)
-
-def select_folder(title):
-    """Mở hộp thoại chọn thư mục"""
-    root = tk.Tk()
-    root.withdraw()
-    folder = filedialog.askdirectory(title=title)
-    root.destroy()
-    return folder
-
-def is_hidden(filepath):
-    """Kiểm tra xem tệp/thư mục có thuộc tính ẩn không"""
-    try:
-        attrs = ctypes.windll.kernel32.GetFileAttributesW(filepath)
-        return attrs & FILE_ATTRIBUTE_HIDDEN
-    except:
-        return False
-
-def set_hidden(filepath):
-    """Đặt thuộc tính ẩn cho tệp/thư mục"""
-    try:
-        ctypes.windll.kernel32.SetFileAttributesW(filepath, FILE_ATTRIBUTE_HIDDEN)
-    except:
-        pass
-
-def is_temp_file(filename):
-    """Kiểm tra xem tệp/thư mục có phải là tạm thời hay không."""
-    temp_patterns = ["~", ".tmp", ".part", ".crdownload", "New Folder", "New Text Document"]
-    return any(filename.startswith(pattern) or filename.endswith(pattern) for pattern in temp_patterns)
-
-def is_temp_file(filename):
-    """Kiểm tra xem tệp/thư mục có phải là tạm thời không."""
-    temp_extensions = {'.tmp', '.swp', '.lock'}
-    return any(filename.endswith(ext) for ext in temp_extensions)
-
-def is_recently_created(path, threshold=60):
-    """Kiểm tra xem tệp hoặc thư mục có được tạo trong vòng `threshold` giây không."""
-    creation_time = os.path.getctime(path)
-    current_time = time.time()
-    return (current_time - creation_time) < threshold
-
-def sync_folders(src, dst, task_name):
-    """Đồng bộ hóa thư mục nguồn sang thư mục đích theo hướng một chiều."""
-    if not os.path.exists(src):
-        if os.path.exists(dst):
-            running_flags[task_name] = True
-            shutil.rmtree(dst)
-            print(f"Đã xóa thư mục đích: {dst} vì thư mục nguồn không tồn tại.")
-        running_flags[task_name] = False
-        return
+def sync_folders(src, dst, task_name, first=False):
+    """Đồng bộ hóa thư mục giữa src và dst theo cả hai chiều."""
+    deleted_items = set()
     
     if not os.path.exists(dst):
-        running_flags[task_name] = True
         os.makedirs(dst)
         print(f"Đã tạo thư mục đích: {dst}")
-    running_flags[task_name] = False
     
+    if not os.path.exists(src):
+        os.makedirs(src)
+        print(f"Đã tạo thư mục nguồn: {src}")
+    
+    # Đồng bộ từ src -> dst
+    sync_one_way(src, dst, task_name, True, first)
+    # Đồng bộ từ dst -> src
+    sync_one_way(dst, src, task_name, False, first)
+    
+
+def sync_one_way(src, dst, task_name, primary=False, first=False):
+
+    if primary:
+        current_struct = list_files_and_folders(src)
+    else:
+        current_struct = list_files_and_folders(dst)
+
+    # Xóa file ở src nếu không có trong dst
+    if not primary and not first:
+        deleted = False
+        for root, dirs, files in os.walk(src, topdown=False):  
+            rel_path = os.path.relpath(root, src)
+            dst_root = os.path.join(dst, rel_path) if rel_path != '.' else dst
+
+            # XÓA FILE nếu không tồn tại trong `dst`
+            for file in files:
+                src_path = os.path.join(root, file)
+                dst_path = os.path.join(dst_root, file)
+
+                if not os.path.exists(dst_path) and not is_temp_file(src_path):
+                    print(f"🚀 Xóa file: {src_path}")
+                    os.remove(src_path)
+                    deleted = True
+
+            # XÓA THƯ MỤC nếu nó rỗng sau khi xóa file
+            if deleted:
+                for dir_name in dirs:
+                    src_dir = os.path.join(root, dir_name)
+                    dst_dir = os.path.join(dst_root, dir_name)
+
+                    if not os.path.exists(dst_dir) and os.path.exists(src_dir):  # Nếu thư mục không có ở dst
+                        try:
+                            os.rmdir(src_dir)  # Xóa thư mục nếu nó RỖNG
+                            print(f"🗑️ Đã xóa thư mục rỗng: {src_dir}")
+                        except OSError:
+                            print(f"⚠️ Không thể xóa {src_dir} (Không rỗng?)")
+    
+    """Đồng bộ hóa từ thư mục src sang dst."""
     for root, dirs, files in os.walk(src):
         rel_path = os.path.relpath(root, src)
         dst_root = os.path.join(dst, rel_path) if rel_path != '.' else dst
-        
-        if not os.path.exists(dst_root):
+
+        # không tồn tại ở đích và không phải file tạm thời
+        if not os.path.exists(dst_root) and not is_temp_file(rel_path):
             os.makedirs(dst_root)
-            running_flags[task_name] = True
             print(f"Đã tạo thư mục: {dst_root}")
-        running_flags[task_name] = False
         
         for file in files:
-            if is_temp_file(file):
-                continue
-            
             src_path = os.path.join(root, file)
             dst_path = os.path.join(dst_root, file)
             
-            if not os.path.exists(dst_path) or not filecmp.cmp(src_path, dst_path, shallow=False):
-                running_flags[task_name] = True
+            if is_temp_file(file):
+                continue
+            
+            if not os.path.exists(dst_path) and not is_temp_file(src_path):
+                shutil.copy2(src_path, dst_path)
+                print(f"Đã sao chép: {src_path} -> {dst_path}")
+            elif not filecmp.cmp(src_path, dst_path, shallow=False):
                 shutil.copy2(src_path, dst_path)
                 print(f"Đã cập nhật: {src_path} -> {dst_path}")
-            running_flags[task_name] = False
-    
-    for root, dirs, files in os.walk(dst, topdown=False):
-        rel_path = os.path.relpath(root, dst)
-        src_root = os.path.join(src, rel_path) if rel_path != '.' else src
-        
-        for file in files:
-            dst_path = os.path.join(root, file)
-            src_file_path = os.path.join(src_root, file)
-            if not os.path.exists(src_file_path) and not is_temp_file(file):
-                if not is_recently_created(dst_path):  # Kiểm tra thời gian tạo
-                    os.remove(dst_path)
-                    running_flags[task_name] = True
-                    print(f"Đã xóa tệp: {dst_path}")
-            running_flags[task_name] = False
-        
-        for dir in dirs:
-            dst_dir = os.path.join(root, dir)
-            src_dir_path = os.path.join(src_root, dir)
-            if not os.path.exists(src_dir_path):
-                if not is_recently_created(dst_dir):  # Kiểm tra thời gian tạo
-                    shutil.rmtree(dst_dir)
-                    running_flags[task_name] = True
-                    print(f"Đã xóa thư mục: {dst_dir}")
-            running_flags[task_name] = False
 
-def sync_loop(task_name, src, dst):
+def sync_loop(task_name, src, dst, src_uuid=None, dst_uuid=None):
     """Luồng chạy đồng bộ hóa cho từng tiến trình"""
     print(f"[{task_name}] Bắt đầu giám sát...")
 
     usb_plugin = True
     stop_flags[task_name] = False  # Cờ kiểm soát vòng lặp
-    
+
+    first = True
     while not stop_flags[task_name]:
         # Kiểm tra xem ổ đĩa có tồn tại không
-        dst_drive = os.path.splitdrive(dst)[0]  # Lấy phần ổ đĩa (ví dụ: 'E:')
-        if not os.path.exists(dst_drive):
+        source_uuid = get_drive_uuid(src)
+        if not source_uuid == src_uuid:
             if usb_plugin:
-                print(f"[{task_name}] Ổ đĩa chưa cắm, đang chờ...")
+                print(f"[{task_name}] Ổ đĩa nguồn chưa cắm, đang chờ...")
+                running_flags[task_name] = False
+                usb_plugin = False
+            time.sleep(2)
+            continue  # Quay lại vòng lặp để tiếp tục kiểm tra
+        running_flags[task_name] = True
+
+        # Kiểm tra xem ổ đĩa có tồn tại không
+        destination_uuid = get_drive_uuid(dst)
+        if not destination_uuid == dst_uuid:
+            if usb_plugin:
+                print(f"[{task_name}] Ổ đĩa đích chưa cắm, đang chờ...")
                 running_flags[task_name] = False
                 usb_plugin = False
             time.sleep(2)
@@ -185,9 +150,10 @@ def sync_loop(task_name, src, dst):
 
         # Tiến hành đồng bộ
         running_flags[task_name] = True
-        sync_folders(src, dst, task_name)
+        sync_folders(src, dst, task_name, first)
         running_flags[task_name] = False
         print(f"[{task_name}] Đồng bộ hoàn tất.")
+        first = False
         time.sleep(2)
 
     print(f"[{task_name}] Đã dừng đồng bộ.")  # Xác nhận tiến trình đã dừng
@@ -218,13 +184,13 @@ def create_process(icon, item):
         messagebox.showerror("Lỗi", "Tên tiến trình đã tồn tại. Vui lòng chọn tên khác.")
         return
 
-    src = select_folder("Chọn thư mục nguồn")
+    src, src_uuid = select_folder("Chọn thư mục nguồn")
     if not src:
         print("⚠️ Hủy tiến trình do không có thư mục nguồn.")
         messagebox.showerror("Lỗi", "Không có thư mục nguồn nào được chọn.")
         return
 
-    dst = select_folder("Chọn thư mục đích")
+    dst, dst_uuid = select_folder("Chọn thư mục đích")
     if not dst:
         print("⚠️ Hủy tiến trình do không có thư mục đích.")
         messagebox.showerror("Lỗi", "Không có thư mục đích nào được chọn.")
@@ -235,10 +201,10 @@ def create_process(icon, item):
         messagebox.showerror("Lỗi", "Không có thư mục nguồn hoặc đích nào được chọn.")
         return
 
-    tasks.append({"name": task_name, "source": src, "destination": dst})
+    tasks.append({"name": task_name, "source": src, "source_uuid": src_uuid, "destination_uuid": dst_uuid, "destination": dst})
     save_tasks(tasks)
 
-    thread = threading.Thread(target=sync_loop, args=(task_name, src, dst, icon), daemon=True)
+    thread = threading.Thread(target=sync_loop, args=(task_name, src, dst, src_uuid, dst_uuid), daemon=True)
     thread.start()
     running_threads[task_name] = thread
     running_flags[task_name] = True
@@ -348,8 +314,27 @@ def exit_app(icon):
 # Khởi chạy tiến trình có sẵn
 tasks = load_tasks()
 for task in tasks:  # Duyệt từng task trong danh sách
-    thread = threading.Thread(target=sync_loop, args=(task["name"], task["source"], task["destination"]), daemon=True)
-    thread.start()
+    if task['source_uuid'] and task['destination_uuid']:
+        name_task = task["name"]
+        src_path = task["source"]
+        dst_path = task["destination"]
+        src_struct = list_files_and_folders(src_path)
+        dst_struct = list_files_and_folders(src_path)
+
+        task_folder = os.path.join(BASE_DIR, "folder_struct", name_task)
+        os.makedirs(task_folder, exist_ok=True)  # Tạo thư mục nếu chưa có
+        src_struct_path = os.path.join(BASE_DIR, "folder_struct", name_task, "src_struct.json")
+        dst_struct_path = os.path.join(BASE_DIR, "folder_struct", name_task, "dst_struct.json")
+        
+        # Lưu vào tệp JSON
+        with open(src_struct_path, "w", encoding="utf-8") as json_file:
+            json.dump(src_struct, json_file, indent=4, ensure_ascii=False)
+
+        with open(dst_struct_path, "w", encoding="utf-8") as json_file:
+            json.dump(dst_struct, json_file, indent=4, ensure_ascii=False)
+            
+        thread = threading.Thread(target=sync_loop, args=(task["name"], task["source"], task["destination"], task["source_uuid"], task["destination_uuid"]), daemon=True)
+        thread.start()
 
 create_system_tray_icon()
 
